@@ -1,0 +1,4 @@
+[submodule "shimsrc"]
+	path = shimsrc
+	url = git@github.com:tearizz/shimsrc.git
+	branch = riscv64
