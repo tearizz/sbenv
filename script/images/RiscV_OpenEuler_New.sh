@@ -1,28 +1,33 @@
 #!/bin/bash
 set -e
 # =============================================================================
-# RiscV_OpenEuler_New.sh — RISC-V Secure Boot 磁盘镜像构建脚本
+# RISC-V Secure Boot 磁盘镜像构建脚本
 #
 # 在 sign_all.sh 签名完成后执行，完成以下工作：
 #   1) 创建 GPT 磁盘 (ESP + rootfs)
-#   2) 部署 Shim / GRUB / 网络驱动 / startup.nsh 到 ESP
-#   3) 安装 OpenEuler RISC-V rootfs (离线备份 或 Docker)
+#   2) 部署 Shim + GRUB + 网络驱动 + startup.nsh 到 ESP
+#   3) 安装 OpenEuler RISC-V rootfs (本地 → Package Repo → Docker)
 #   4) 用 RISC-V 原生 grub2-mkimage (qemu-user) 构建 GRUB
 #   5) 生成 QEMU virt DTB
 #   6) 签名 GRUB + 内核
 #
-# 前置依赖: sign_all.sh 已完成
+# 前置依赖: sign_all.sh 
 # 用法:
 #   sudo ./script/images/RiscV_OpenEuler_New.sh          # 离线模式 (默认)
-#   sudo ./script/images/RiscV_OpenEuler_New.sh --docker # Docker 在线模式
+#   sudo ./script/images/RiscV_OpenEuler_New.sh --docker # Docker 在线模式 (跳过离线备份)
+#
+# rootfs 配置优先级:
+#   1. 本地 artifact/oerv_rootfs_backup.tar.gz
+#   2. GitLab Package Registry 下载 (需设置 GITLAB_PROJECT + GITLAB_TOKEN 环境变量)
+#   3. Docker 在线安装 (兜底, 需网络)
 # =============================================================================
 
 # ----[ 日志函数 ]------------------------------------------------------------
 YELLOW='\033[0;33m' RED='\033[0;31m' BLUE='\033[0;34m' WHITE='\033[0m'
 _step=0
-_step()  { ((++_step)); printf "${YELLOW}[%02d] %s${WHITE}\n" "$_step" "$*"; }
-_info()  { printf "${BLUE}%s${WHITE}\n" "$*"; }
-_die()   { printf "${RED}%s${WHITE}\n" "$*"; exit 1; }
+_step()  { ((++_step)); printf '%s[%02d] %s%s\n' "$YELLOW" "$_step" "$*" "$WHITE"; }
+_info()  { printf '%s%s%s\n' "$BLUE" "$*" "$WHITE"; }
+_die()   { printf '%s%s%s\n' "$RED" "$*" "$WHITE"; exit 1; }
 
 # ----[ 路径解析 ]------------------------------------------------------------
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -53,12 +58,44 @@ for f in "$SHIM" "$MM" "$CSV" "$DB_KEY" "$DB_CRT" \
     [ -f "$f" ] || _die "缺少文件: $f  (请先运行 sign_all.sh)"
 done
 
-# ----[ Rootfs 模式: 离线备份 / Docker 在线 ]----------------------------------
+# ----[ Rootfs 模式: 本地 离线 / 制品仓库 下载 / Docker 在线 ]------------------
 ROOTFS_BK="$ARTIFACT/oerv_rootfs_backup.tar.gz"
+GITLAB_API="${GITLAB_API:-https://code.osssc.ac.cn/api/v4}"
+GITLAB_PROJECT="${GITLAB_PROJECT:-}"
+GITLAB_TOKEN="${GITLAB_TOKEN:-}"
+PKG_NAME="oerv_rootfs_backup"
+PKG_VERSION="1.0.0"
 OFFLINE=false
-[ -f "$ROOTFS_BK" ] && OFFLINE=true
 [ "${1:-}" = "--docker" ] && OFFLINE=false && shift
 
+# 优先级1: 本地已有离线备份文件
+if [ -f "$ROOTFS_BK" ]; then
+    OFFLINE=true
+    _info "rootfs 模式: 本地离线备份 ($(du -h "$ROOTFS_BK" | cut -f1))"
+
+# 优先级2: 从 GitLab Package Registry 下载 （需 GITLAB_PROJECT 与 GITLAB_TOKEN 环境变量）
+elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
+    _info "尝试从 GitLab Package Registry 下载 rootfs..."
+    _info "  → ${GITLAB_API}/projects/${GITLAB_PROJECT}/packages/generic/${PKG_NAME}/${PKG_VERSION}/oerv_rootfs_backup.tar.gz"
+    if curl -fSL --progress-bar \
+        --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+        -o "$ROOTFS_BK" \
+        "${GITLAB_API}/projects/${GITLAB_PROJECT}/packages/generic/${PKG_NAME}/${PKG_VERSION}/oerv_rootfs_backup.tar.gz"; then
+        # 下载后做完整性验证
+        if gzip -t "$ROOTFS_BK" 2>/dev/null; then
+            OFFLINE=true
+            _info "下载成功并验证完成 ($(du -h "$ROOTFS_BK" | cut -f1))"
+        else
+            _info "下载文件损坏, 删除并回退"
+            rm -f "$ROOTFS_BK"
+        fi
+    else
+        _info "下载失败 (检查环境变量 GITLAB_PROJECT / GITLAB_TOKEN 是否正确)"
+        rm -f "$ROOTFS_BK"
+    fi
+fi
+
+# 优先级3: Docker 在线安装
 if $OFFLINE; then
     _info "rootfs 模式: 离线备份 ($(du -h "$ROOTFS_BK" | cut -f1))"
 else
@@ -251,7 +288,9 @@ rm -f "$DTB"
 _info "DTB → /boot/riscv-virt.dtb"
 
 _step "创建 grub.cfg"
-KVER=$(ls "$ROOT_MP"/boot/vmlinuz-* 2>/dev/null | head -1 | sed 's|.*/vmlinuz-||')
+for f in "$ROOT_MP"/boot/vmlinuz-*; do
+	[ -f "$f" ] && KVER=$(basename "$f" | sed 's|^vmlinuz-||') && break
+done
 [ -n "$KVER" ] || _die "未找到内核 (vmlinuz)"
 
 # 注意: RISC-V 下 GRUB lockdown 会阻止 devicetree 命令
@@ -306,8 +345,8 @@ _step "完成 — 验证 ESP 文件列表"
 find "$ESP_MP" -type f | sort
 mv -f "$DISK_TMP" "$DISK"
 echo ""
-printf "${BLUE}============================================${WHITE}\n"
-printf "${BLUE}  镜像构建成功!${WHITE}\n"
-printf "${BLUE}  位置: ${DISK}${WHITE}\n"
-printf "${BLUE}  大小: %s${WHITE}\n" "$(du -h "$DISK" | cut -f1)"
-printf "${BLUE}============================================${WHITE}\n"
+printf '%s============================================%s\n' "$BLUE" "$WHITE"
+printf '%s  镜像构建成功!%s\n' "$BLUE" "$WHITE"
+printf '%s  位置: %s%s\n' "$BLUE" "$DISK" "$WHITE"
+printf '%s  大小: %s%s\n' "$BLUE" "$(du -h "$DISK" | cut -f1)" "$WHITE"
+printf '%s============================================%s\n' "$BLUE" "$WHITE"
