@@ -1,93 +1,636 @@
-# rvoe
+# rvoe — RISC-V Secure Boot in openEuler 
 
+基于 QEMU 的 RISC-V UEFI Secure Boot 实验环境，目标系统为 openEuler RISC-V。
 
+**验证链**：`EDK2 (UEFI 固件) → Shim → GRUB → Linux Kernel`
 
-## Getting started
+Shim 的验证策略为 **HTTP-first**：优先通过 HTTP 远程验证服务（keyless signature）进行在线签名验证，失败后 fallback 到本地 DB 证书链验证。
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+## 架构概览
 
 ```
-cd existing_repo
-git remote add origin https://code.osssc.ac.cn/digital-signature/secure-boot/rvoe.git
-git branch -M main
-git push -uf origin main
+┌──────────────────────────────────────────────────┐
+│                    QEMU (riscv64)                 │
+│  ┌────────────────────────────────────────────┐  │
+│  │         EDK2 UEFI Firmware (pflash)        │  │
+│  │  SECURE_BOOT_ENABLE=TRUE                   │  │
+│  │  Hash2DxeCrypto + TcpDxe + HttpDxe 驱动    │  │
+│  │  VARS 已注入 PK/KEK/DB + SecureBoot=ON     │  │
+│  └────────────────────────────────────────────┘  │
+│                      │                            │
+│                      ▼                            │
+│  ┌────────────────────────────────────────────┐  │
+│  │  Shim (BOOTRISCV64.EFI)                    │  │
+│  │  ├─ 1. HTTP 远程验证 → 10.0.2.2:8080/verify│  │
+│  │  ├─ 2. DB 证书链验证 (fallback)             │  │
+│  │  └─ 3. Vendor Cert 验证 (fallback)          │  │
+│  └────────────────────────────────────────────┘  │
+│                      │                            │
+│                      ▼                            │
+│  ┌────────────────────────────────────────────┐  │
+│  │  GRUB (grubriscv64.efi) + grub.cfg         │  │
+│  │  (RISC-V 原生 grub2-mkimage 构建, 已签名)  │  │
+│  └────────────────────────────────────────────┘  │
+│                      │                            │
+│                      ▼                            │
+│  ┌────────────────────────────────────────────┐  │
+│  │  Linux Kernel (sbsign 已签名)              │  │
+│  │  + openEuler rootfs (ext4)                  │  │
+│  └────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────┘
+         │                                ▲
+         │  QEMU user-net (10.0.2.2)      │
+         └────────────────────────────────┘
+              HTTP POST /verify
+     ┌────────────────────────────────────┐
+     │   Remote Verification Service      │
+     │   (宿主机上运行, 监听 0.0.0.0:8080) │
+     └────────────────────────────────────┘
 ```
 
-## Integrate with your tools
+**网络驱动加载链**：
+```
+Shell (startup.nsh)
+  └→ load Hash2DxeCrypto.efi  (提供 gEfiHash2ProtocolGuid — TcpDxe 依赖)
+     └→ load TcpDxe.efi        (提供 EFI_TCP4_PROTOCOL — HttpDxe 依赖)
+        └→ load HttpDxe.efi    (提供 EFI_HTTP_PROTOCOL — Shim HTTP 验证用)
+           └→ fs0:\EFI\BOOT\BOOTRISCV64.EFI (Shim)
+```
 
-* [Set up project integrations](https://code.osssc.ac.cn/digital-signature/secure-boot/rvoe/-/settings/integrations)
+## 目录结构
 
-## Collaborate with your team
+```
+rvoe/
+├── rv_boot.sh                  # QEMU 启动脚本
+├── script/
+│   ├── 0_init/                 # EDK2 初始化
+│   │   ├── setup-edk2.sh       #   clone EDK2 + patch 
+│   │   ├── edk2-riscv.patch    #   RISC-V Secure Boot patch
+│   │   └── edk2-base-commit.txt #  EDK2 基线 commit
+│   ├── sign_all.sh             # 批量签名 EFI 组件
+│   ├── fix_reloc.py            # 修复 PE .reloc 段 Page RVA
+│   └── images/
+│       └── RiscV_OpenEuler_New.sh  # 构建 RiscV openEuler 磁盘镜像
+├── shimsrc/                    # Shim 源码 (子模块, 分支 riscv64)
+│   └── gnu-efi/               #   gnu-efi (子模块, 分支 osignRV)
+├── artifact/                   # 构建产物 (实验用)
+│   ├── ovmf/                   #   EDK2 固件 (32MB CODE + 32MB VARS)
+│   ├── shim/                   #   Shim EFI 文件 + BOOTRISCV64.CSV
+│   ├── drivers/                #   网络驱动 EFI (已签名)
+│   ├── keys/                   #   UEFI Secure Boot 密钥 (PK/KEK/DB)
+│   ├── images/                 #   磁盘镜像
+│   └── oerv_rootfs_backup.tar.gz  # rootfs 离线备份
+└── .gitmodules
+```
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+## 宿主机环境要求
 
-## Test and Deploy
+| 依赖 | 用途 |
+|------|------|
+| Ubuntu 22.04+ / Debian 12+ (x86_64) | 宿主机 OS |
+| `gcc-riscv64-linux-gnu` | RISC-V 交叉编译工具链 |
+| `qemu-system-riscv64` (≥ 9.0) | RISC-V 虚拟机 (需要 `-cpu rva23s64`) |
+| `qemu-user-static` | 在 x86 宿主机上运行 RISC-V 原生 grub2-mkimage |
+| `sbsigntool` | 签名/验证 EFI PE 文件 |
+| `virt-fw-vars` | 向 UEFI 固件 VARS 注入 PK/KEK/DB 密钥 |
+| `python3` | 运行 fix_reloc.py 和 SizeOfImage 扩展脚本 |
+| `parted`, `dosfstools`, `mtools` | 创建 GPT 磁盘镜像 |
+| `iconv` (glibc 自带) | 生成 UCS-2LE 编码的 CSV 文件 |
+| Docker (可选) | rootfs 在线安装 (离线模式不需要) |
 
-Use the built-in continuous integration in GitLab.
+一键安装：
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    gcc-riscv64-linux-gnu \
+    qemu-system-riscv64 \
+    qemu-user-static \
+    sbsigntool \
+    virt-firmware \
+    python3 \
+    parted dosfstools mtools \
+    uuid-runtime \
+    build-essential \
+    git curl \
+    openssl
+```
 
-***
+---
 
-# Editing this README
+## 全新环境完整部署步骤
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+### 步骤 0：克隆仓库
 
-## Suggestions for a good README
+```bash
+git clone --recursive git@github.com:tearizz/rvoe.git
+cd rvoe
+```
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+> `--recursive` 自动拉取 `shimsrc`（[tearizz/shimsrc](https://github.com/tearizz/shimsrc)，`riscv64` 分支）及其子模块 `gnu-efi`（`osignRV` 分支）。
 
-## Name
-Choose a self-explaining name for your project.
+如果已克隆但未拉取子模块：
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+```bash
+git submodule update --init --recursive
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+---
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+### 步骤 1：构建 EDK2 固件
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+#### 1.1 克隆 EDK2 并打补丁
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+./script/0_init/setup-edk2.sh
+```
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+此脚本会：
+- 克隆 [tianocore/edk2](https://github.com/tianocore/edk2) 到 `artifact/edk2-riscv/`
+- 检出基线 commit（记录在 `script/0_init/edk2-base-commit.txt`）
+- 应用 `script/0_init/edk2-riscv.patch`，修改内容：
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+| 修改项 | 文件 | 说明 |
+|--------|------|------|
+| `SECURE_BOOT_ENABLE = TRUE` | `RiscVVirtQemu.dsc` | 启用 Secure Boot（**必须**，默认 FALSE 则固件不编译 SecurityStubDxe 等驱动） |
+| `NETWORK_HTTP_BOOT_ENABLE = TRUE` | `RiscVVirtQemu.dsc` | 启用 HttpDxe（**必须**，默认 FALSE 则 Shim 找不到 `EFI_HTTP_PROTOCOL`） |
+| `Hash2DxeCrypto.inf` | `RiscVVirtQemu.dsc` + `.fdf` | TcpDxe 的 Depex 依赖此驱动，缺失则 TcpDxe 报 `Not Found` |
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+#### 1.2 编译 EDK2
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+```bash
+cd artifact/edk2-riscv
+export WORKSPACE=$PWD
+export EDK_TOOLS_PATH=$WORKSPACE/BaseTools
+export GCC_RISCV64_PREFIX=riscv64-linux-gnu-
+export PATH=$EDK_TOOLS_PATH/BinWrappers/PosixLike:$PATH
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+make -C BaseTools -j$(nproc)
+source edksetup.sh
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+python3 BaseTools/Source/Python/build/build.py \
+    -p OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc \
+    -a RISCV64 -t GCC -b RELEASE
 
-## License
-For open source projects, say how it is licensed.
+cd ../..
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+输出产物：
+- `Build/RiscVVirtQemu/RELEASE_GCC/FV/RISCV_VIRT_CODE.fd` — 固件代码
+- `Build/RiscVVirtQemu/RELEASE_GCC/FV/RISCV_VIRT_VARS.fd` — 固件变量模板
+
+#### 1.3 部署固件 + 填充到 32MB
+
+```bash
+cd artifact/edk2-riscv
+
+# 复制到 artifact/ovmf/
+cp Build/RiscVVirtQemu/RELEASE_GCC/FV/RISCV_VIRT_CODE.fd ../ovmf/
+cp Build/RiscVVirtQemu/RELEASE_GCC/FV/RISCV_VIRT_VARS.fd ../ovmf/
+
+cd ../ovmf
+
+# QEMU pflash 要求 32MB 对齐，填充
+truncate -s 32M RISCV_VIRT_CODE.fd
+truncate -s 32M RISCV_VIRT_VARS.fd
+
+# 创建 rv_boot.sh 引用的文件名
+ln -sf RISCV_VIRT_CODE.fd rv_code_32m.fd
+ln -sf RISCV_VIRT_VARS.fd rv_vars_32m.fd
+
+cd ../..
+```
+
+#### 1.4 注入 PK/KEK/DB 密钥到固件 VARS（**关键步骤**）
+
+EDK2 构建产出的 VARS 文件 **不含任何密钥**，必须手动注入：
+
+```bash
+# 1. 生成密钥（如果还没有）
+openssl req -new -x509 -newkey rsa:2048 -subj "/CN=PK/" \
+    -keyout artifact/keys/PK.key -out artifact/keys/PK.crt \
+    -days 3650 -nodes -sha256
+openssl req -new -x509 -newkey rsa:2048 -subj "/CN=KEK/" \
+    -keyout artifact/keys/KEK.key -out artifact/keys/KEK.crt \
+    -days 3650 -nodes -sha256
+openssl req -new -x509 -newkey rsa:2048 -subj "/CN=DB/" \
+    -keyout artifact/keys/DB.key -out artifact/keys/DB.crt \
+    -days 3650 -nodes -sha256
+
+# 2. 转换 DER 格式（virt-fw-vars 需要）
+openssl x509 -in artifact/keys/PK.crt  -outform DER -out artifact/keys/PK.cer
+openssl x509 -in artifact/keys/KEK.crt -outform DER -out artifact/keys/KEK.cer
+openssl x509 -in artifact/keys/DB.crt  -outform DER -out artifact/keys/DB.cer
+
+# 3. 注入密钥到 VARS 并启用 Secure Boot
+virt-fw-vars \
+    --input artifact/ovmf/rv_vars_32m.fd \
+    --output artifact/ovmf/rv_vars_32m.fd \
+    --set-pk "$(uuidgen)" artifact/keys/PK.cer \
+    --add-kek "$(uuidgen)" artifact/keys/KEK.cer \
+    --add-db "$(uuidgen)" artifact/keys/DB.cer \
+    --secure-boot
+
+# 4. 验证注入结果
+virt-fw-vars --input artifact/ovmf/rv_vars_32m.fd --print | grep -E 'PK|KEK|SecureBoot'
+# 必须输出: SecureBootEnable: bool: ON
+```
+
+> `--secure-boot` 标志会创建 PK/KEK/db/dbx 变量并设置 `SecureBootEnable=ON`。
+
+> **注意**：仓库中已提供的 `artifact/ovmf/` 固件已经注入密钥，可直接使用。如果重新编译了 EDK2，必须执行此步骤。
+
+---
+
+### 步骤 2：构建 gnu-efi（RISC-V）
+
+gnu-efi 的 Make 系统存在几个坑，需要特别注意：
+
+```bash
+cd shimsrc/gnu-efi
+
+# ⚠️ 不要只用默认的 `make ARCH=riscv64` — 会构建 apps 子目录并失败
+# 原因1: Make.defaults 第71行 LD := $(CROSS_COMPILE)ld，使用裸 ld
+#        传 LD=gcc 会导致 gcc 不理解 ld 的 flags
+# 原因2: apps 子目录的 Makefile 会追加 --defsym=EFI_SUBSYSTEM=...，加剧问题
+#
+# 正确做法：只构建 lib, gnuefi, inc 三个子目录
+
+make ARCH=riscv64 \
+    CC=riscv64-linux-gnu-gcc \
+    HOSTCC=gcc \
+    TOPDIR=$(pwd) \
+    -f $(pwd)/Makefile \
+    lib gnuefi inc
+
+# 验证输出
+ls riscv64/lib/libefi.a
+ls riscv64/gnuefi/libgnuefi.a
+ls riscv64/gnuefi/crt0-efi-riscv64.o
+```
+
+#### 2.1 修改 gnu-efi 编译制品（**关键**）
+
+Shim 的 Makefile 在链接时需要 `crt0-efi-riscv64-local.o`（即 crt0 的 local 变体）。
+gnu-efi 默认只生成 `crt0-efi-riscv64.o`，需要手动复制：
+
+```bash
+cp riscv64/gnuefi/crt0-efi-riscv64.o \
+   riscv64/gnuefi/crt0-efi-riscv64-local.o
+
+cd ../..
+```
+
+---
+
+### 步骤 3：构建 Shim
+
+本仓库的 shimsrc 已包含所有必要的 RISC-V Secure Boot 修改：
+
+| 修改位置 | 内容 |
+|----------|------|
+| `keyless-sign.c:657` | 远程验证 URL → `http://10.0.2.2:8080/verify` |
+| `shim.c:704-726` | HTTP-first 验证顺序（先 HTTP 远程验证，失败后 fallback DB） |
+| `http-request.c:167` | `load_network_drivers()` — 从 ESP 加载网络驱动 |
+| `http-request.c:256-271` | HTTP binding 30 秒等待循环（确保网络栈就绪） |
+
+```bash
+cd shimsrc
+
+# 将 DB 证书放入 shim 源码目录（构建时需要嵌入 Vendor Cert）
+cp ../artifact/keys/DB.cer .
+
+# 编译
+make -j$(nproc) \
+    ARCH=riscv64 \
+    CROSS_COMPILE=riscv64-linux-gnu- \
+    COMPILER=gcc \
+    EFIDIR=openEuler \
+    VENDOR_CERT_FILE=DB.cer \
+    ENABLE_SHIM_CERT=y
+
+cd ..
+```
+
+#### 3.1 安装 Shim 产物到 artifact
+
+```bash
+mkdir -p artifact/shim
+
+# 复制主文件
+cp shimsrc/shimriscv64.efi artifact/shim/
+cp shimsrc/mmriscv64.efi  artifact/shim/
+# fbriscv64.efi (fallback) 可选
+cp shimsrc/fbriscv64.efi artifact/shim/ 2>/dev/null || true
+
+# 生成 BOOTRISCV64.CSV （⚠️ 必须用 UCS-2LE 编码！）
+echo "shimriscv64.efi,openEuler,,This is the boot entry for openEuler" \
+    | iconv -t UCS-2LE > artifact/shim/BOOTRISCV64.CSV
+```
+
+> CSV 格式：`<shim名称>,<OS标签>,,<描述>`，UCS-2LE 编码是 UEFI 规范要求。
+
+---
+
+### 步骤 4：提取网络驱动
+
+即使固件已编译 Hash2DxeCrypto + TcpDxe + HttpDxe，仍然建议在 ESP 上放置已签名驱动作为双保险。
+驱动必须从**同一 EDK2 版本**提取并签名：
+
+```bash
+mkdir -p artifact/drivers
+
+EDK2_BUILD="artifact/edk2-riscv/Build/RiscVVirtQemu/RELEASE_GCC"
+
+# 按依赖顺序：Hash2DxeCrypto → TcpDxe → HttpDxe
+for drv in Hash2DxeCrypto TcpDxe HttpDxe; do
+    find "$EDK2_BUILD" -name "${drv}.efi" -exec cp {} artifact/drivers/ \;
+done
+```
+
+> 仓库 `artifact/drivers/` 中已提供预提取并签名的驱动文件，可直接使用。
+
+---
+
+### 步骤 5：签名所有 EFI 组件
+
+```bash
+./script/sign_all.sh
+```
+
+每个 EFI 文件的签名流程为：
+
+```
+sbattach --remove    (先移除已有签名)
+  → fix_reloc        (修复 PE .reloc 段 Page RVA)
+  → expand SizeOfImage (预扩展，为签名证书留空间)
+  → sbsign           (用 DB.key 签名)
+  → sbverify         (验证签名)
+```
+
+> **顺序至关重要**：`fix_reloc` 修改 PE 文件会破坏已有签名，所以必须先移除旧签名，再 fix_reloc，最后重新签名。
+
+**必须签名的文件**：
+
+| 文件 | 来源 | 说明 |
+|------|------|------|
+| `artifact/shim/shimriscv64.efi` | Shim 构建 | 主 Shim |
+| `artifact/shim/mmriscv64.efi` | Shim 构建 | MokManager |
+| `artifact/shim/fbriscv64.efi` | Shim 构建 | Fallback (可选) |
+| `artifact/drivers/Hash2DxeCrypto.efi` | EDK2 Build | Hash2 服务 (TcpDxe 依赖) |
+| `artifact/drivers/TcpDxe.efi` | EDK2 Build | TCP4 协议 (HttpDxe 依赖) |
+| `artifact/drivers/HttpDxe.efi` | EDK2 Build | HTTP 协议 (Shim 远程验证用) |
+| `artifact/images 中的 grubriscv64.efi` | 镜像构建时生成 | GRUB (脚本自动签名) |
+| `rootfs 中的 vmlinuz-*` | Docker/离线 rootfs | Linux 内核 (脚本自动签名) |
+
+**不需要签名的文件**：`initramfs-*.img` 是 cpio 归档，不是 PE 格式，`sbsign` 会报 `Invalid DOS header magic`。GRUB 不验证 initramfs 的签名。
+
+---
+
+### 步骤 6：准备 rootfs + 构建磁盘镜像
+
+rootfs 有三种获取方式，镜像构建脚本按优先级自动选择：
+
+| 优先级 | 方式 | 说明 |
+|--------|------|------|
+| 1 | 离线备份 | `artifact/oerv_rootfs_backup.tar.gz` 已存在则直接使用 |
+| 2 | GitLab Package Registry | 设置环境变量自动下载 |
+| 3 | Docker 在线安装 | `--docker` 参数触发 (约 10-20 分钟，需网络) |
+
+```bash
+# 方式 1（推荐）：放置 rootfs 备份
+cp /path/to/oerv_rootfs_backup.tar.gz artifact/
+
+# 方式 2：GitLab 下载
+export GITLAB_PROJECT="<project_id>"
+export GITLAB_TOKEN="<personal_access_token>"
+
+# 方式 3：Docker 在线安装
+# sudo ./script/images/RiscV_OpenEuler_New.sh --docker
+```
+
+然后构建磁盘镜像：
+
+```bash
+sudo ./script/images/RiscV_OpenEuler_New.sh
+```
+
+此脚本自动完成：
+1. 创建 12GB GPT 磁盘（ESP 512MB FAT32 + rootfs ext4）
+2. 部署 Shim + MokManager + CSV + 网络驱动 + startup.nsh 到 ESP
+3. 安装 rootfs（离线解压或 Docker 在线安装）
+4. 通过 `qemu-riscv64-static` 运行 RISC-V 原生 `grub2-mkimage` 构建 GRUB
+5. 生成 QEMU virt DTB 并放入 `/boot/`
+6. 创建 `grub.cfg`（**不含 `devicetree` 命令** — Secure Boot 下 GRUB lockdown 会阻止它，内核自动从 UEFI Configuration Table 读取 DTB）
+7. 签名 GRUB + Linux 内核
+
+输出：`artifact/images/RiscV_OpenEuler.img`
+
+---
+
+### 步骤 7：启动远程验证服务
+
+Shim 的 HTTP-first 验证策略会优先向 `http://10.0.2.2:8080/verify` 发送 POST 请求（`10.0.2.2` 是 QEMU user-mode 网络下宿主机的固定地址）。
+
+**接口规范**：
+
+请求（POST `/verify`, Content-Type: `application/json`）：
+```json
+{
+    "certificate": "<base64 DER 证书>",
+    "payload": "<base64 Authenticode 哈希>",
+    "signature": "<base64 PKCS#7 签名>"
+}
+```
+
+响应：HTTP 200 = 验证通过，非 200 = 验证失败（Shim fallback 到 DB 本地验证）。
+
+**最小可用服务器**（供测试）：
+
+```bash
+python3 -c "
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{\"result\":\"yes\"}')
+HTTPServer(('0.0.0.0', 8080), H).serve_forever()
+" &
+```
+
+> ⚠️ 远程验证服务的完整实现不在本仓库中，以上是测试用桩。如需修改验证服务器地址，编辑 `shimsrc/keyless-sign.c:657` 后重新编译 Shim。
+
+---
+
+### 步骤 8：启动 QEMU
+
+```bash
+sudo ./rv_boot.sh --arch rv --kernel openEuler --secureboot
+```
+
+参数说明：
+
+| 参数 | 可选值 | 说明 |
+|------|--------|------|
+| `-a, --arch` | `rv`, `x86` | 虚拟机架构 |
+| `-k, --kernel` | `openEuler`, `ubuntu` | 启动的系统内核 |
+| `--secureboot` | — | 启用安全启动 |
+| `--unsecureboot` | — | 关闭安全启动 |
+
+QEMU 以 `-nographic` 模式启动，串口输出直接连接到终端。按 `Ctrl+A X` 退出。
+
+**默认 SSH 端口转发**：宿主机 `12055` → 虚拟机 `22`。
+
+**预期启动日志**：
+```
+=== RISC-V Secure Boot: Loading Network Drivers ===
+Image 'fs0:\EFI\BOOT\Hash2DxeCrypto.efi' loaded at XXX - Success
+Image 'fs0:\EFI\BOOT\TcpDxe.efi' loaded at XXX - Success
+Image 'fs0:\EFI\BOOT\HttpDxe.efi' loaded at XXX - Success
+=== Starting Shim ===
+Get http response body: {"result":"yes"}
+GNU GRUB version 2.12
+  Booting `openEuler RISC-V'
+EFI stub: Booting Linux Kernel...
+openEuler 24.03 (LTS)
+openeuler-riscv login:
+```
+
+**VM 内验证 Secure Boot 已启用**：
+```bash
+mokutil --sb-state            # 应输出: SecureBoot enabled
+# 或
+cat /sys/firmware/efi/efivars/SecureBoot-* | hexdump -C | head -1
+# 最后一个字节应为 01
+```
+
+---
+
+## 一键流程总结
+
+```bash
+# 0. 克隆
+git clone --recursive git@github.com:tearizz/rvoe.git && cd rvoe
+
+# 1. 安装依赖
+sudo apt-get update
+sudo apt-get install -y gcc-riscv64-linux-gnu qemu-system-riscv64 \
+    qemu-user-static sbsigntool virt-firmware python3 \
+    parted dosfstools mtools uuid-runtime build-essential git curl openssl
+
+# 2. 构建 EDK2（或使用 artifact/ovmf 中预编译的固件）
+./script/0_init/setup-edk2.sh
+cd artifact/edk2-riscv
+export WORKSPACE=$PWD EDK_TOOLS_PATH=$WORKSPACE/BaseTools
+export GCC_RISCV64_PREFIX=riscv64-linux-gnu-
+export PATH=$EDK_TOOLS_PATH/BinWrappers/PosixLike:$PATH
+make -C BaseTools -j$(nproc) && source edksetup.sh
+python3 BaseTools/Source/Python/build/build.py \
+    -p OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc -a RISCV64 -t GCC -b RELEASE
+cd ../..
+# 部署固件 + 填充 32MB + 注入密钥（见步骤 1.3–1.4）
+
+# 3. 构建 gnu-efi（只构建 lib gnuefi inc）
+cd shimsrc/gnu-efi
+make ARCH=riscv64 CC=riscv64-linux-gnu-gcc HOSTCC=gcc \
+    TOPDIR=$(pwd) -f $(pwd)/Makefile lib gnuefi inc
+cp riscv64/gnuefi/crt0-efi-riscv64.o \
+   riscv64/gnuefi/crt0-efi-riscv64-local.o
+cd ../..
+
+# 4. 构建 Shim（或使用 artifact/shim 中预编译的 EFI）
+cd shimsrc
+cp ../artifact/keys/DB.cer .
+make -j$(nproc) ARCH=riscv64 CROSS_COMPILE=riscv64-linux-gnu- \
+    COMPILER=gcc EFIDIR=openEuler VENDOR_CERT_FILE=DB.cer ENABLE_SHIM_CERT=y
+cd ..
+# 复制产物到 artifact/shim（见步骤 3.1）
+
+# 5. 提取驱动 + 签名
+mkdir -p artifact/drivers
+find artifact/edk2-riscv/Build -name 'Hash2DxeCrypto.efi' -exec cp {} artifact/drivers/ \;
+find artifact/edk2-riscv/Build -name 'TcpDxe.efi' -exec cp {} artifact/drivers/ \;
+find artifact/edk2-riscv/Build -name 'HttpDxe.efi' -exec cp {} artifact/drivers/ \;
+./script/sign_all.sh
+
+# 6. 构建磁盘镜像
+# 确保 artifact/oerv_rootfs_backup.tar.gz 已就位
+sudo ./script/images/RiscV_OpenEuler_New.sh
+
+# 7. 终端 1 — 启动远程验证服务
+python3 -c "
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header('Content-Type','application/json')
+        self.end_headers()
+        self.wfile.write(b'{\"result\":\"yes\"}')
+HTTPServer(('0.0.0.0', 8080), H).serve_forever()
+" &
+
+# 8. 终端 2 — 启动 QEMU
+sudo ./rv_boot.sh --arch rv --kernel openEuler --secureboot
+```
+
+---
+
+## QEMU 关键参数
+
+| 参数 | 作用 |
+|------|------|
+| `-cpu rva23s64,sv39=on,zkr=true` | Zkr 扩展必须启用 (TcpDxe 的 RNG 依赖) |
+| `-smp 1 -m 4G` | SMP=1 避免 GRUB relocation overflow；内存 >8G 也会触发 overflow |
+| `pflash0` (read-only) | 固件 CODE (32MB, 含 OpenSBI) |
+| `pflash1` (read-write) | 固件 VARS (32MB, 含 PK/KEK/DB 密钥) |
+| `-netdev user` | QEMU 用户态网络 (Guest DHCP→10.0.2.15, Host→10.0.2.2) |
+
+---
+
+## 重要注意事项
+
+### fix_reloc 问题
+
+gnu-efi CRT0 通过 `dummy - label1` 计算 `.reloc` 段 Page RVA。当 `.data` VMA < `.reloc` VMA 时（RISC-V 链接脚本常见情况），结果为负值（`>= 0x80000000` 的无符号表示）。UEFI PE 加载器拒绝此类映像，报 `Command Error Status: Unsupported`。
+
+`script/fix_reloc.py` 检测负值并将其修正为 `0x1000`。**必须对以下所有 EFI 执行 fix_reloc**：shimriscv64.efi, mmriscv64.efi, fbriscv64.efi, grubriscv64.efi。
+
+`sign_all.sh` 已自动处理此步骤。
+
+### GRUB 构建注意事项
+
+- **必须用 RISC-V 原生 grub2-mkimage**：x86_64 宿主的 `grub-mkimage` 会产生 relocation overflow。镜像构建脚本通过 `qemu-riscv64-static` 运行 rootfs 中的原生 grub2-mkimage。
+- **grub.cfg 不能包含 `devicetree`**：Secure Boot 下 GRUB lockdown 会阻止此命令。UEFI 固件会自动将 DTB 放入 Configuration Table，内核可直接读取。
+- **initramfs 不签名**：`initramfs-*.img` 是 cpio 归档，`sbsign` 只处理 PE/COFF 格式。
+
+### 安全启动签名链
+
+```
+UEFI 固件 ──[DB 证书]──→ 验证 Shim (BOOTRISCV64.EFI)
+    │ 固件从 VARS 读取 DB，验证 Shim 的 PKCS#7 签名
+    ▼
+Shim ──[Vendor Cert + DB]──→ 验证 GRUB (grubriscv64.efi)
+    │ HTTP 远程验证优先，失败 fallback DB 本地验证
+    ▼
+GRUB ──[shim_verify()]──→ 验证 Kernel (vmlinuz)
+    │ 内核必须用 sbsign + DB.key 签名
+    ▼
+Linux Kernel → systemd → Login
+```
+
+**每一个环节的签名必须有效**，否则整条 Secure Boot 链断裂。
+
+### sudo 权限
+
+`RiscV_OpenEuler_New.sh` 需要 root（loopback 设备、mkfs、mount）。`rv_boot.sh` 用 `sudo -S` 执行 QEMU（pflash 需要 CAP_SYS_ADMIN）。建议配置免密码 sudo 或手动输入。
+
+---
+
+## 相关仓库
+
+- [tearizz/rvoe](https://github.com/tearizz/rvoe) — 本项目（实验环境 + 构建脚本）
+- [tearizz/shimsrc](https://github.com/tearizz/shimsrc) (分支 `riscv64`) — 修改后的 Shim 源码（HTTP-first 验证 + RISC-V 支持）
+- [gnu-efi](https://git.code.sf.net/p/gnu-efi/code) (分支 `osignRV`) — RISC-V 签名支持的 EFI 开发工具链
+- [tianocore/edk2](https://github.com/tianocore/edk2) — UEFI 固件参考实现
