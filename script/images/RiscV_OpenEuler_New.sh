@@ -54,7 +54,7 @@ for f in "$SHIM" "$MM" "$CSV" "$DB_KEY" "$DB_CRT" \
 done
 
 # ----[ Rootfs 模式: 离线备份 / Docker 在线 ]----------------------------------
-ROOTFS_BK="$ARTIFACT/rv_rootfs_backup.tar.gz"
+ROOTFS_BK="$ARTIFACT/oerv_rootfs_backup.tar.gz"
 OFFLINE=false
 [ -f "$ROOTFS_BK" ] && OFFLINE=true
 [ "${1:-}" = "--docker" ] && OFFLINE=false && shift
