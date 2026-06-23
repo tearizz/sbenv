@@ -23,11 +23,11 @@ set -e
 # =============================================================================
 
 # ----[ 日志函数 ]------------------------------------------------------------
-YELLOW='\033[0;33m' RED='\033[0;31m' BLUE='\033[0;34m' WHITE='\033[0m'
+YELLOW=$'\033[0;33m' RED=$'\033[0;31m' BLUE=$'\033[0;34m' NC=$'\033[0m'
 _step=0
-_step()  { ((++_step)); printf '%s[%02d] %s%s\n' "$YELLOW" "$_step" "$*" "$WHITE"; }
-_info()  { printf '%s%s%s\n' "$BLUE" "$*" "$WHITE"; }
-_die()   { printf '%s%s%s\n' "$RED" "$*" "$WHITE"; exit 1; }
+_step()  { ((++_step)); printf '%s[%02d] %s%s\n' "$YELLOW" "$_step" "$*" "$NC"; }
+_info()  { printf '%s%s%s\n' "$BLUE" "$*" "$NC"; }
+_die()   { printf '%s%s%s\n' "$RED" "$*" "$NC"; exit 1; }
 
 # ----[ 路径解析 ]------------------------------------------------------------
 SELF_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
@@ -70,8 +70,13 @@ OFFLINE=false
 
 # 优先级1: 本地已有离线备份文件
 if [ -f "$ROOTFS_BK" ]; then
-    OFFLINE=true
-    _info "rootfs 模式: 本地离线备份 ($(du -h "$ROOTFS_BK" | cut -f1))"
+    if gzip -t "$ROOTFS_BK" 2>/dev/null; then
+        OFFLINE=true
+        _info "rootfs 模式: 本地离线备份 ($(du -h "$ROOTFS_BK" | cut -f1))"
+    else
+        _info "本地备份文件损坏, 删除并回退"
+        rm -f "$ROOTFS_BK"
+    fi
 
 # 优先级2: 从 GitLab Package Registry 下载 （需 GITLAB_PROJECT 与 GITLAB_TOKEN 环境变量）
 elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
@@ -91,7 +96,7 @@ elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
         fi
     else
         _info "下载失败 (检查环境变量 GITLAB_PROJECT / GITLAB_TOKEN 是否正确)"
-        rm -f "$ROOTFS_BK"
+        [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
     fi
 fi
 
@@ -121,6 +126,7 @@ trap cleanup EXIT
 #  阶段 1: 创建磁盘 + 分区 + 格式化
 # =============================================================================
 _step "创建 12GB GPT 磁盘镜像 (ESP 512MB + rootfs 剩余)"
+mkdir -p "$(dirname "$DISK_TMP")"
 rm -f "$DISK_TMP"
 qemu-img create -f raw "$DISK_TMP" 12G
 
@@ -345,8 +351,8 @@ _step "完成 — 验证 ESP 文件列表"
 find "$ESP_MP" -type f | sort
 mv -f "$DISK_TMP" "$DISK"
 echo ""
-printf '%s============================================%s\n' "$BLUE" "$WHITE"
-printf '%s  镜像构建成功!%s\n' "$BLUE" "$WHITE"
-printf '%s  位置: %s%s\n' "$BLUE" "$DISK" "$WHITE"
-printf '%s  大小: %s%s\n' "$BLUE" "$(du -h "$DISK" | cut -f1)" "$WHITE"
-printf '%s============================================%s\n' "$BLUE" "$WHITE"
+printf '%s============================================%s\n' "$BLUE" "$NC"
+printf '%s  镜像构建成功!%s\n' "$BLUE" "$NC"
+printf '%s  位置: %s%s\n' "$BLUE" "$DISK" "$NC"
+printf '%s  大小: %s%s\n' "$BLUE" "$(du -h "$DISK" | cut -f1)" "$NC"
+printf '%s============================================%s\n' "$BLUE" "$NC"

@@ -14,27 +14,27 @@ Shim 的验证策略为 **HTTP-first**：优先通过 HTTP 远程验证服务（
 │  ┌────────────────────────────────────────────┐  │
 │  │         EDK2 UEFI Firmware (pflash)        │  │
 │  │  SECURE_BOOT_ENABLE=TRUE                   │  │
-│  │  Hash2DxeCrypto + TcpDxe + HttpDxe 驱动    │  │
+│  │  Hash2DxeCrypto + TcpDxe + HttpDxe Drivers    │  │
 │  │  VARS 已注入 PK/KEK/DB + SecureBoot=ON     │  │
 │  └────────────────────────────────────────────┘  │
 │                      │                            │
 │                      ▼                            │
 │  ┌────────────────────────────────────────────┐  │
 │  │  Shim (BOOTRISCV64.EFI)                    │  │
-│  │  ├─ 1. HTTP 远程验证 → 10.0.2.2:8080/verify│  │
-│  │  ├─ 2. DB 证书链验证 (fallback)             │  │
-│  │  └─ 3. Vendor Cert 验证 (fallback)          │  │
+│  │  ├─ 1. HTTP Keyless Verify → 10.0.2.2:8080/verify│  │
+│  │  ├─ 2. DB CertChain Verify (fallback)             │  │
+│  │  └─ 3. Vendor Cert Verify (fallback)          │  │
 │  └────────────────────────────────────────────┘  │
 │                      │                            │
 │                      ▼                            │
 │  ┌────────────────────────────────────────────┐  │
 │  │  GRUB (grubriscv64.efi) + grub.cfg         │  │
-│  │  (RISC-V 原生 grub2-mkimage 构建, 已签名)  │  │
+│  │  (RISC-V origin grub2-mkimage built and signed)  │  │
 │  └────────────────────────────────────────────┘  │
 │                      │                            │
 │                      ▼                            │
 │  ┌────────────────────────────────────────────┐  │
-│  │  Linux Kernel (sbsign 已签名)              │  │
+│  │  Linux Kernel (sbsign signed)              │  │
 │  │  + openEuler rootfs (ext4)                  │  │
 │  └────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────┘
@@ -44,7 +44,7 @@ Shim 的验证策略为 **HTTP-first**：优先通过 HTTP 远程验证服务（
               HTTP POST /verify
      ┌────────────────────────────────────┐
      │   Remote Verification Service      │
-     │   (宿主机上运行, 监听 0.0.0.0:8080) │
+     │   (Run on Host, Listening 0.0.0.0:8080) │
      └────────────────────────────────────┘
 ```
 
@@ -63,10 +63,12 @@ Shell (startup.nsh)
 rvoe/
 ├── rv_boot.sh                  # QEMU 启动脚本
 ├── script/
-│   ├── 0_init/                 # EDK2 初始化
+│   ├── 0_init_edk/                 # EDK2 初始化
 │   │   ├── setup-edk2.sh       #   clone EDK2 + patch 
 │   │   ├── edk2-riscv.patch    #   RISC-V Secure Boot patch
 │   │   └── edk2-base-commit.txt #  EDK2 基线 commit
+│   ├── 1_init_keys/                 # EDK2 初始化
+│   │   ├── setup-keys.sh       #   clone EDK2 + patch 
 │   ├── sign_all.sh             # 批量签名 EFI 组件
 │   ├── fix_reloc.py            # 修复 PE .reloc 段 Page RVA
 │   └── images/
@@ -123,7 +125,7 @@ sudo apt-get install -y \
 ### 步骤 0：克隆仓库
 
 ```bash
-git clone --recursive git@github.com:tearizz/rvoe.git
+git clone --recursive https://code.osssc.ac.cn/digital-signature/secure-boot/rvoe.git
 cd rvoe
 ```
 
@@ -142,13 +144,13 @@ git submodule update --init --recursive
 #### 1.1 克隆 EDK2 并打补丁
 
 ```bash
-./script/0_init/setup-edk2.sh
+./script/0_init_edk/setup-edk2.sh
 ```
 
 此脚本会：
 - 克隆 [tianocore/edk2](https://github.com/tianocore/edk2) 到 `artifact/edk2-riscv/`
-- 检出基线 commit（记录在 `script/0_init/edk2-base-commit.txt`）
-- 应用 `script/0_init/edk2-riscv.patch`，修改内容：
+- 检出基线 commit（记录在 `script/0_init_edk/edk2-base-commit.txt`）
+- 应用 `script/0_init_edk/edk2-riscv.patch`，修改内容：
 
 | 修改项 | 文件 | 说明 |
 |--------|------|------|
@@ -168,9 +170,15 @@ export PATH=$EDK_TOOLS_PATH/BinWrappers/PosixLike:$PATH
 make -C BaseTools -j$(nproc)
 source edksetup.sh
 
+# Method1
 python3 BaseTools/Source/Python/build/build.py \
     -p OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc \
     -a RISCV64 -t GCC -b RELEASE
+# If method1 failed, try:
+export PYTHON_COMMAND=python3
+BaseTools/BinWrappers/PosixLike/build \
+      -p OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc \
+      -a RISCV64 -t GCC -b RELEASE
 
 cd ../..
 ```
@@ -190,13 +198,13 @@ cp Build/RiscVVirtQemu/RELEASE_GCC/FV/RISCV_VIRT_VARS.fd ../ovmf/
 
 cd ../ovmf
 
-# QEMU pflash 要求 32MB 对齐，填充
-truncate -s 32M RISCV_VIRT_CODE.fd
-truncate -s 32M RISCV_VIRT_VARS.fd
+# 创建备份
+cp RISCV_VIRT_CODE rv_code_32m.fd
+cp RISCV_VIRT_VARS rv_vars_32m.fd
 
-# 创建 rv_boot.sh 引用的文件名
-ln -sf RISCV_VIRT_CODE.fd rv_code_32m.fd
-ln -sf RISCV_VIRT_VARS.fd rv_vars_32m.fd
+# QEMU pflash 要求 32MB 对齐，填充
+truncate -s 32M rv_code_32m.fd
+truncate -s 32M rv_vars_32m.fd
 
 cd ../..
 ```
@@ -206,34 +214,7 @@ cd ../..
 EDK2 构建产出的 VARS 文件 **不含任何密钥**，必须手动注入：
 
 ```bash
-# 1. 生成密钥（如果还没有）
-openssl req -new -x509 -newkey rsa:2048 -subj "/CN=PK/" \
-    -keyout artifact/keys/PK.key -out artifact/keys/PK.crt \
-    -days 3650 -nodes -sha256
-openssl req -new -x509 -newkey rsa:2048 -subj "/CN=KEK/" \
-    -keyout artifact/keys/KEK.key -out artifact/keys/KEK.crt \
-    -days 3650 -nodes -sha256
-openssl req -new -x509 -newkey rsa:2048 -subj "/CN=DB/" \
-    -keyout artifact/keys/DB.key -out artifact/keys/DB.crt \
-    -days 3650 -nodes -sha256
-
-# 2. 转换 DER 格式（virt-fw-vars 需要）
-openssl x509 -in artifact/keys/PK.crt  -outform DER -out artifact/keys/PK.cer
-openssl x509 -in artifact/keys/KEK.crt -outform DER -out artifact/keys/KEK.cer
-openssl x509 -in artifact/keys/DB.crt  -outform DER -out artifact/keys/DB.cer
-
-# 3. 注入密钥到 VARS 并启用 Secure Boot
-virt-fw-vars \
-    --input artifact/ovmf/rv_vars_32m.fd \
-    --output artifact/ovmf/rv_vars_32m.fd \
-    --set-pk "$(uuidgen)" artifact/keys/PK.cer \
-    --add-kek "$(uuidgen)" artifact/keys/KEK.cer \
-    --add-db "$(uuidgen)" artifact/keys/DB.cer \
-    --secure-boot
-
-# 4. 验证注入结果
-virt-fw-vars --input artifact/ovmf/rv_vars_32m.fd --print | grep -E 'PK|KEK|SecureBoot'
-# 必须输出: SecureBootEnable: bool: ON
+bash script/1_init_keys/setup-keys.sh
 ```
 
 > `--secure-boot` 标志会创建 PK/KEK/db/dbx 变量并设置 `SecureBootEnable=ON`。
@@ -521,7 +502,7 @@ sudo apt-get install -y gcc-riscv64-linux-gnu qemu-system-riscv64 \
     parted dosfstools mtools uuid-runtime build-essential git curl openssl
 
 # 2. 构建 EDK2（或使用 artifact/ovmf 中预编译的固件）
-./script/0_init/setup-edk2.sh
+bash script/0_init_edk/setup-edk2.sh
 cd artifact/edk2-riscv
 export WORKSPACE=$PWD EDK_TOOLS_PATH=$WORKSPACE/BaseTools
 export GCC_RISCV64_PREFIX=riscv64-linux-gnu-
@@ -530,7 +511,8 @@ make -C BaseTools -j$(nproc) && source edksetup.sh
 python3 BaseTools/Source/Python/build/build.py \
     -p OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc -a RISCV64 -t GCC -b RELEASE
 cd ../..
-# 部署固件 + 填充 32MB + 注入密钥（见步骤 1.3–1.4）
+# 部署固件 + 填充 32MB + 注入密钥
+bash script/1_init_keys/setup-keys.sh
 
 # 3. 构建 gnu-efi（只构建 lib gnuefi inc）
 cd shimsrc/gnu-efi

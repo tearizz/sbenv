@@ -1,8 +1,9 @@
 # edk2
 artifact/edk2-riscv/
-!script/0_init/edk2-riscv.patch
-!script/0_init/edk2-base-commit.txt
-!script/0_init/setup-edk2.sh
+artifact/backup
+!script/0_init_edk/edk2-riscv.patch
+!script/0_init_edk/edk2-base-commit.txt
+!script/0_init_edk/setup-edk2.sh
 
 # compile artifact
 *.o
