@@ -1,9 +1,9 @@
 # edk2
-artifact/edk2-riscv/
+artifact/edk2/
 artifact/backup
-!script/0_init_edk/edk2-riscv.patch
-!script/0_init_edk/edk2-base-commit.txt
-!script/0_init_edk/setup-edk2.sh
+!script/resources/edk2-riscv.patch
+!script/resources/edk2-x64.patch
+!script/resources/edk2-base-commit.txt
 
 # compile artifact
 *.o
@@ -11,10 +11,6 @@ artifact/backup
 *.img
 *.tar.gz
 riscv64/
-
-# edk2 artifact
-artifact/edk2-riscv/Build/
-artifact/edk2-riscv/Conf/
 
 # dev artifact
 .claude

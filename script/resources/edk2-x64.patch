@@ -1,0 +1,22 @@
+diff --git a/OvmfPkg/OvmfPkgX64.dsc b/OvmfPkg/OvmfPkgX64.dsc
+index 2780fe4..e20a6b4 100644
+--- a/OvmfPkg/OvmfPkgX64.dsc
++++ b/OvmfPkg/OvmfPkgX64.dsc
+@@ -29,7 +29,7 @@
+   # Defines for default states.  These can be changed on the command line.
+   # -D FLAG=VALUE
+   #
+-  DEFINE SECURE_BOOT_ENABLE      = FALSE
++  DEFINE SECURE_BOOT_ENABLE      = TRUE
+   DEFINE SMM_REQUIRE             = FALSE
+   DEFINE QEMU_PV_VARS            = FALSE
+   DEFINE STANDALONE_MM_ENABLE    = FALSE
+@@ -49,7 +49,7 @@
+   #
+   DEFINE NETWORK_TLS_ENABLE             = FALSE
+   DEFINE NETWORK_IP6_ENABLE             = FALSE
+-  DEFINE NETWORK_HTTP_BOOT_ENABLE       = FALSE
++  DEFINE NETWORK_HTTP_BOOT_ENABLE       = TRUE
+   DEFINE NETWORK_ALLOW_HTTP_CONNECTIONS = TRUE
+   DEFINE NETWORK_ISCSI_ENABLE           = TRUE
+   DEFINE NETWORK_ISCSI_DEFAULT_ENABLE   = FALSE
