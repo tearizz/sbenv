@@ -448,7 +448,7 @@ sbattach --remove       ← 移除已有签名
 # 示例：提取 x86_openEuler rootfs 备份
 sudo losetup -f -P artifact/images/x86_openEuler.img --show
 sudo mount /dev/loopNp2 /mnt
-sudo tar -czf artifact/x86oe_rootfs_backup.tar.gz -C /mnt .
+sudo tar -czf artifact/oex86_rootfs_backup.tar.gz -C /mnt .
 sudo umount /mnt && sudo losetup -d /dev/loopN
 ```
 

@@ -89,19 +89,50 @@ else
     echo "  BOOTX64.CSV generated"
 fi
 
-# =============================================================================
-#  3. Install openEuler x86_64 rootfs
-# =============================================================================
-ROOTFS_BK="$ARTIFACT/x86oe_rootfs_backup.tar.gz"
+# ----[ Rootfs 来源: 本地 离线 / 制品仓库 下载 / Docker 在线 ]------------------
+ROOTFS_BK="$ARTIFACT/oex86_rootfs_backup.tar.gz"
+GITLAB_API="${GITLAB_API:-https://code.osssc.ac.cn/api/v4}"
+GITLAB_PROJECT="${GITLAB_PROJECT:-}"
+GITLAB_TOKEN="${GITLAB_TOKEN:-}"
+PKG_NAME="oex86_rootfs_backup"
+PKG_VERSION="1.0.0"
 OFFLINE=false
 
+# 优先级1: 本地已有离线备份文件
 if [ -f "$ROOTFS_BK" ] && gzip -t "$ROOTFS_BK" 2>/dev/null; then
     OFFLINE=true
     echo "[3/5] Extracting rootfs from local backup ($(du -h "$ROOTFS_BK" | cut -f1))..."
     sudo tar -xzf "$ROOTFS_BK" -C "$ROOT_MP"
     sudo mkdir -p "$ROOT_MP"/{dev,proc,sys,run,boot/efi}
     echo "  Extraction complete"
-else
+
+# 优先级2: 从 GitLab Package Registry 下载 (需 GITLAB_PROJECT 与 GITLAB_TOKEN 环境变量)
+elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
+    echo "[3/5] Downloading rootfs from GitLab Package Registry..."
+    echo "  → ${GITLAB_API}/projects/${GITLAB_PROJECT}/packages/generic/${PKG_NAME}/${PKG_VERSION}/oex86_rootfs_backup.tar.gz"
+    if curl -fSL --progress-bar \
+        --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+        -o "$ROOTFS_BK" \
+        "${GITLAB_API}/projects/${GITLAB_PROJECT}/packages/generic/${PKG_NAME}/${PKG_VERSION}/oex86_rootfs_backup.tar.gz"; then
+        if gzip -t "$ROOTFS_BK" 2>/dev/null; then
+            OFFLINE=true
+            echo "  Download OK ($(du -h "$ROOTFS_BK" | cut -f1))"
+            echo "  Extracting..."
+            sudo tar -xzf "$ROOTFS_BK" -C "$ROOT_MP"
+            sudo mkdir -p "$ROOT_MP"/{dev,proc,sys,run,boot/efi}
+            echo "  Extraction complete"
+        else
+            echo "  Download corrupted, falling back to Docker"
+            rm -f "$ROOTFS_BK"
+        fi
+    else
+        echo "  Download failed (check GITLAB_PROJECT / GITLAB_TOKEN)"
+        [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
+    fi
+fi
+
+# 优先级3: Docker 在线安装
+if ! $OFFLINE; then
     echo "[3/5] Installing rootfs via Docker (this may take several minutes)..."
 
     sudo docker pull hub.oepkgs.net/openeuler/openeuler:24.03-lts
