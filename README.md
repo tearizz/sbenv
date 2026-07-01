@@ -1,4 +1,4 @@
-# expenv — RISC-V & x86_64 UEFI Secure Boot 实验环境
+# **SBENV** — RISC-V & x86_64 UEFI Secure Boot 实验环境
 
 基于 QEMU 的多架构 UEFI Secure Boot 开发与测试环境。一份代码、一套密钥，同时支撑 **RISC-V 64** 和 **x86_64** 双架构的 Secure Boot 实验。
 
