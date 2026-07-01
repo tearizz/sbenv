@@ -19,7 +19,8 @@ set -e
 # rootfs 配置优先级:
 #   1. 本地 artifact/oerv_rootfs_backup.tar.gz
 #   2. GitLab Package Registry 下载 (需设置 GITLAB_PROJECT + GITLAB_TOKEN 环境变量)
-#   3. Docker 在线安装 (兜底, 需网络)
+#   3. GitHub Releases 下载 (默认 tearizz/sbenv, 可选 GITHUB_REPO / GITHUB_TOKEN)
+#   4. Docker 在线安装 (兜底, 需网络)
 # =============================================================================
 
 # ----[ 日志函数 ]------------------------------------------------------------
@@ -65,6 +66,9 @@ GITLAB_PROJECT="${GITLAB_PROJECT:-}"
 GITLAB_TOKEN="${GITLAB_TOKEN:-}"
 PKG_NAME="oerv_rootfs_backup"
 PKG_VERSION="1.0.0"
+GITHUB_REPO="${GITHUB_REPO:-tearizz/sbenv}"
+GITHUB_RELEASE_TAG="${GITHUB_RELEASE_TAG:-v1.0.0}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 OFFLINE=false
 [ "${1:-}" = "--docker" ] && OFFLINE=false && shift
 
@@ -98,9 +102,33 @@ elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
         _info "下载失败 (检查环境变量 GITLAB_PROJECT / GITLAB_TOKEN 是否正确)"
         [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
     fi
+
+# 优先级3: 从 GitHub Releases 下载 (默认 tearizz/sbenv, 公开仓库无需 TOKEN)
+elif [ ! -f "$ROOTFS_BK" ]; then
+    GITHUB_DL_URL="https://github.com/${GITHUB_REPO}/releases/download/${GITHUB_RELEASE_TAG}/${PKG_NAME}.tar.gz"
+    _info "尝试从 GitHub Releases 下载 rootfs..."
+    _info "  → ${GITHUB_DL_URL}"
+
+    CURL_AUTH=()
+    if [ -n "$GITHUB_TOKEN" ]; then
+        CURL_AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/octet-stream")
+    fi
+
+    if curl -fSL --progress-bar "${CURL_AUTH[@]}" -o "$ROOTFS_BK" "$GITHUB_DL_URL"; then
+        if gzip -t "$ROOTFS_BK" 2>/dev/null; then
+            OFFLINE=true
+            _info "下载成功并验证完成 ($(du -h "$ROOTFS_BK" | cut -f1))"
+        else
+            _info "下载文件损坏, 删除并回退"
+            rm -f "$ROOTFS_BK"
+        fi
+    else
+        _info "下载失败 (检查 GITHUB_REPO / GITHUB_RELEASE_TAG 是否正确)"
+        [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
+    fi
 fi
 
-# 优先级3: Docker 在线安装
+# 优先级4: Docker 在线安装
 if $OFFLINE; then
     _info "rootfs 模式: 离线备份 ($(du -h "$ROOTFS_BK" | cut -f1))"
 else

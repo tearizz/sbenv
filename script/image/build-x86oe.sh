@@ -89,13 +89,16 @@ else
     echo "  BOOTX64.CSV generated"
 fi
 
-# ----[ Rootfs 来源: 本地 离线 / 制品仓库 下载 / Docker 在线 ]------------------
+# ----[ Rootfs 来源: 本地 离线 / GitLab制品仓库 / GitHub Releases / Docker 在线 ]----
 ROOTFS_BK="$ARTIFACT/oex86_rootfs_backup.tar.gz"
 GITLAB_API="${GITLAB_API:-https://code.osssc.ac.cn/api/v4}"
 GITLAB_PROJECT="${GITLAB_PROJECT:-}"
 GITLAB_TOKEN="${GITLAB_TOKEN:-}"
 PKG_NAME="oex86_rootfs_backup"
 PKG_VERSION="1.0.0"
+GITHUB_REPO="${GITHUB_REPO:-tearizz/sbenv}"
+GITHUB_RELEASE_TAG="${GITHUB_RELEASE_TAG:-v1.0.0}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 OFFLINE=false
 
 # 优先级1: 本地已有离线备份文件
@@ -129,9 +132,37 @@ elif [ -n "$GITLAB_PROJECT" ] && [ -n "$GITLAB_TOKEN" ]; then
         echo "  Download failed (check GITLAB_PROJECT / GITLAB_TOKEN)"
         [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
     fi
+
+# 优先级3: 从 GitHub Releases 下载 (默认 tearizz/sbenv, 公开仓库无需 TOKEN)
+elif [ ! -f "$ROOTFS_BK" ]; then
+    GITHUB_DL_URL="https://github.com/${GITHUB_REPO}/releases/download/${GITHUB_RELEASE_TAG}/${PKG_NAME}.tar.gz"
+    echo "[3/5] Downloading rootfs from GitHub Releases..."
+    echo "  → ${GITHUB_DL_URL}"
+
+    CURL_AUTH=()
+    if [ -n "$GITHUB_TOKEN" ]; then
+        CURL_AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/octet-stream")
+    fi
+
+    if curl -fSL --progress-bar "${CURL_AUTH[@]}" -o "$ROOTFS_BK" "$GITHUB_DL_URL"; then
+        if gzip -t "$ROOTFS_BK" 2>/dev/null; then
+            OFFLINE=true
+            echo "  Download OK ($(du -h "$ROOTFS_BK" | cut -f1))"
+            echo "  Extracting..."
+            sudo tar -xzf "$ROOTFS_BK" -C "$ROOT_MP"
+            sudo mkdir -p "$ROOT_MP"/{dev,proc,sys,run,boot/efi}
+            echo "  Extraction complete"
+        else
+            echo "  Download corrupted, falling back to Docker"
+            rm -f "$ROOTFS_BK"
+        fi
+    else
+        echo "  Download failed (check GITHUB_REPO / GITHUB_RELEASE_TAG)"
+        [ -f "$ROOTFS_BK" ] && rm -f "$ROOTFS_BK"
+    fi
 fi
 
-# 优先级3: Docker 在线安装
+# 优先级4: Docker 在线安装
 if ! $OFFLINE; then
     echo "[3/5] Installing rootfs via Docker (this may take several minutes)..."
 
