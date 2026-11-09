@@ -345,6 +345,12 @@ cp ../artifact/keys/DB.cer .
 make -j$(nproc) \
     ARCH=riscv64 CROSS_COMPILE=riscv64-linux-gnu- COMPILER=gcc \
     EFIDIR=openEuler VENDOR_CERT_FILE=DB.cer ENABLE_SHIM_CERT=y
+```
+构建 RISC-V shim 后、需要 `make clean`，再构建 x86_64。因为 shim 的 Makefile 把 .o 直接落在源码顶层（没有按架构分目录），当继续构建 X86_64 时，Make 看到这些 .o 已经存在且比源文件新，就不重新编译，直接把 RISC-V 对象拿去链接 x86_64 目标，导致 `file in wrong format` 问题
+```bash
+# ===== Clean Environment =====
+cd shimsrc
+make clean-shim-objs clean-openssl-objs clean-cryptlib-objs clean-lib-objs
 
 # ===== x86_64 Shim =====
 make -j$(nproc) \
