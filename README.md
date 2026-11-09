@@ -274,7 +274,7 @@ cp artifact/edk2/Build/OvmfX64/RELEASE_GCC/FV/OVMF_CODE.fd artifact/ovmf/x86code
 cp artifact/edk2/Build/OvmfX64/RELEASE_GCC/FV/OVMF_VARS.fd artifact/ovmf/x86vars.fd
 ```
 
-> **大小说明**：RV 固件原始约 8MB，QEMU pflash 对 RISC-V 强制要求 32MB 对齐。x86 OVMF 约 3.5MB，无此要求。
+> **大小说明**：RV 固件原始约 8MB，QEMU pflash 对 RISC-V 强制要求 **CODE 与 VARS 都 32MB** 对齐。`rvcode.fd` 在本步 truncate；`rvvars.fd` 在步骤 2 注入密钥后由 `setup-keys.sh` 自动 truncate（顺序很重要：先注入再 truncate，否则 virt-fw-vars 会把文件写回原始 VARS 尺寸）。x86 OVMF 约 3.5MB，无此要求。
 
 ---
 
