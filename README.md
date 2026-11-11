@@ -18,6 +18,15 @@
 EDK2 (OVMF 固件) → Shim → GRUB → Linux Kernel
 ```
 
+**签名模式**:
+
+| 模式 | Shim | GRUB / Kernel | 验签方式 |
+|---|---|---|---|
+| 有密钥（keyed） | DB.crt（sbsign） | DB.crt（sbsign） | 本地 DB 校验 |
+| 无密钥（keyless） | DB.crt（sbsign） | OriginSign keyless（Fulcio + Rekor） | HTTP → OriginSign Server |
+
+> Shim 由固件用 DB 验证，**永远是 keyed**；keyless 只作用于 **GRUB/Kernel**（由 Shim 的 `verify_buffer` 验证）。
+
 ---
 
 ## 架构概览
@@ -46,9 +55,11 @@ EDK2 (OVMF 固件) → Shim → GRUB → Linux Kernel
 │                      ▼                                      │
 │  ┌───────────────────────────┐  │
 │  │  Shim (BOOTRISCV64.EFI)                              │  │
-│  │  ├─ 1. HTTP verify → 10.0.2.2:8080/verify         │  │
-│  │  ├─ 2. DB Certchain verify (fallback)              │  │
-│  │  └─ 3. Vendor Cert Verify (fallback)               │  │
+│  │  ├─ 1. Keyless only → HTTP POST                      │  │
+│  │  │     10.0.2.2:28082/v1/verify/authenticode          │  │
+│  │  │     (Fulcio chain + SCT + Rekor on OriginSign Srv)│  │
+│  │  ├─ 2. DB Certchain verify (fallback / keyed)        │  │
+│  │  └─ 3. Vendor Cert Verify (fallback)                 │  │
 │  └───────────────────────────┘  │
 │                      │                                      │
 │                      ▼                                      │
@@ -118,10 +129,13 @@ rvoe/
 ├── script/
 │   ├── setup-edk2.sh                 # clone EDK2 + apply rv + x86 双 patch
 │   ├── setup-keys.sh                 # generate PK/KEK/DB + inject rv & x86  VARS
-│   ├── sign-rv.sh                    # risc-v EFI sign (fix_reloc)
-│   ├── sign-x86.sh                   # x86_64 EFI sign
+│   ├── sign-rv.sh                    # risc-v EFI sign (fix_reloc, keyed)
+│   ├── sign-x86.sh                   # x86_64 EFI sign (keyed)
+│   ├── sign-keyless.sh               # OriginSign keyless sign (Fulcio + Rekor)
+│   ├── start-osign-server.sh         # start OriginSign verify server (:28082)
 │   ├── image/
-│   │   ├── build-rvoe.sh             # RISC-V + openEuler disk image
+│   │   ├── build-rvoe.sh             # RISC-V + openEuler disk image (keyed GRUB/kernel)
+│   │   ├── build-rvoe-keyless.sh     # RISC-V + openEuler disk image (keyless GRUB/kernel)
 │   │   ├── build-x86oe.sh            # x86_64 + openEuler disk image
 │   │   └── build-x86ubuntu.sh        # x86_64 + Ubuntu disk image
 │   └── resources/
@@ -205,6 +219,59 @@ cd rvoe
 ```bash
 git submodule update --init --recursive
 ```
+
+---
+
+## 步骤 0.5：部署 sigstore-env + 启动 OriginSign Server（仅 Keyless 流程）
+
+> **仅当需要验证 OriginSign 无密钥（Keyless）签名的 GRUB/Kernel 时需要**；纯有密钥（DB.crt）流程可跳过本节。
+
+Keyless 验签依赖外部 Sigstore 组件（Fulcio / Rekor / TUF）以及 OriginSign 验签服务。本仓库不包含它们，需单独部署。
+
+### 0.5.1 部署 sigstore-env
+
+```bash
+# sigstore-env：Fulcio / Rekor / TUF / ctlog / gettoken 的 KinD 部署
+cd /data/code/originsign/sigstore-env
+./deploy-env.sh          # 部署 KinD + Knative + Fulcio/Rekor/TUF
+./start-access.sh        # 建立 .svc 域名的访问入口
+```
+
+部署完成后确认：
+
+```bash
+ls /data/code/originsign/sigstore-env/tuf-cache/remote.json
+curl -sf http://fulcio.fulcio-system.svc:8080/api/v1/rootCert >/dev/null && echo "fulcio ok"
+curl -sf http://rekor.rekor-system.svc:8080/api/v1/log/publicKey >/dev/null && echo "rekor ok"
+```
+
+### 0.5.2 启动 OriginSign 验签服务
+
+```bash
+# 在本仓库根目录执行
+nohup ./script/start-osign-server.sh > /tmp/osign-server.log 2>&1 &
+```
+
+默认监听：
+
+| 端口 | 用途 |
+|---|---|
+| `28082` | HTTP（Shim 通过 `10.0.2.2:28082` 访问） |
+| `29090` | gRPC |
+
+可调环境变量：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `FULCIO_URL` | `http://fulcio.fulcio-system.svc:8080` | Fulcio 证书链 |
+| `REKOR_URL` | `http://rekor.rekor-system.svc:8080` | Rekor 透明日志 |
+| `TUF_ROOT` | `$SIGSTORE_ENV/tuf-cache` | SCT / Rekor 公钥 |
+| `AUDIT_REKOR` | `true` | 是否强制 Rekor 审计（keyless 必须开启） |
+| `VERIFY_CERT` | `true` | 是否校验 Fulcio 链 + SCT |
+| `HTTP_PORT` | `28082` | HTTP 端口 |
+| `SIGSTORE_ENV` | `/data/code/originsign/sigstore-env` | sigstore-env 目录 |
+
+> **注意**：Shim 内编译的验签地址是 `http://10.0.2.2:28082/v1/verify/authenticode`。若修改 `HTTP_PORT`，需同步修改 `shimsrc/keyless-sign.c` 里的 `uri_literal` 并重新构建 Shim（步骤 4）。
 
 ---
 
@@ -433,6 +500,8 @@ sbattach --remove       ← 移除已有签名
 
 签名前自动备份到 `artifact/backup/<timestamp>/`。
 
+> **Keyless 流程说明**：Shim 与网络驱动仍使用 DB.crt（有密钥）签名——Shim 由固件用 DB 验证，**必须是 keyed**。只有 **GRUB 与 Kernel**（由 Shim 的 `verify_buffer` 验证）可以用 keyless 签名，见 **步骤 7a**。
+
 > **为什么 RV 需要 fix_reloc？** gnu-efi CRT0 在 RISC-V 上使用 `-O binary` 输出 (objcopy 不支持 `efi-app-riscv64`)，手工构造 PE 头时 `.reloc` Page RVA 可能为负值。`fix_reloc.py` 检测负值并修正为 `0x1000`。x86_64 使用 `--target efi-app-x86_64`，objcopy 自动生成正确的 PE 头，不存在此问题。
 
 ---
@@ -460,9 +529,27 @@ sudo umount /mnt && sudo losetup -d /dev/loopN
 
 ### 7a. RISC-V + openEuler
 
+**有密钥（keyed）流程** —— GRUB/Kernel 用 DB.crt 签名：
+
 ```bash
 sudo ./script/image/build-rvoe.sh
 ```
+
+**无密钥（keyless）流程** —— GRUB/Kernel 用 OriginSign keyless（Fulcio + Rekor）签名：
+
+```bash
+# 前置：已完成步骤 0.5（sigstore-env + OriginSign Server）
+sudo ./script/image/build-rvoe-keyless.sh
+```
+
+两个脚本共享同一套镜像构建逻辑，仅 **GRUB/Kernel 签名方式**不同：
+
+| 脚本 | GRUB / Kernel 签名 | Shim 验签方式 |
+|---|---|---|
+| `build-rvoe.sh` | `sbsign` + DB.crt（keyed） | 本地 DB 校验 |
+| `build-rvoe-keyless.sh` | OriginSign keyless（Fulcio + Rekor） | HTTP → OriginSign Server（Fulcio 链 + SCT + Rekor） |
+
+> **注意**：keyless 流程下 GRUB/Kernel **只含 keyless 签名**（不含 DB.crt 签名）。Shim 会把它们发到 `10.0.2.2:28082/v1/verify/authenticode` 验证；Server 不可达或 Rekor 无条目时验签失败（本地无 keyed 兜底）。
 
 构建流程：创建 GPT 磁盘 → 部署 Shim + 驱动 + startup.nsh → rootfs 安装 → GRUB 构建 (qemu-user) → DTB + grub.cfg → 签名 GRUB + 内核 → 输出
 
@@ -538,6 +625,39 @@ mokutil --sb-state              # 预期: SecureBoot enabled
 cat /sys/firmware/efi/efivars/SecureBoot-* | hexdump -C | head -1
 # 最后一个字节应为 01 (enabled)
 ```
+
+### 9.1 Keyless 流程额外验证
+
+仅 `build-rvoe-keyless.sh` 构建的镜像需要：
+
+**① 确认 OriginSign Server 在运行**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+    -X POST http://127.0.0.1:28082/v1/verify/authenticode \
+    -H 'Content-Type: application/json' -d '{}'
+# 预期 400（服务在运行，只是空请求被拒）
+```
+
+**② 确认 GRUB/Kernel 只含 keyless 签名（无 DB.crt）**
+
+```bash
+sbattach --detach /tmp/g.p7s grubriscv64.efi
+openssl pkcs7 -inform DER -in /tmp/g.p7s -print_certs -noout
+# 预期只看到 Fulcio 证书（O = Linux Foundation），不应出现 CN = DB
+```
+
+**③ 启动 QEMU，观察串口**
+
+```bash
+sudo ./boot.sh --arch rv --os openEuler
+```
+
+| 现象 | 含义 |
+|---|---|
+| GRUB 菜单出现、内核正常启动 | keyless 验签通过（HTTP → Server → Fulcio/SCT/Rekor） |
+| 串口出现 `HTTP verification failed, falling back to DB` 且随后被拒 | Server 不可达 / Rekor 无条目 / 签名无效 |
+| 串口出现 `No OriginSign keyless signature, local DB verification` | GRUB/Kernel 不是 keyless（可能用了 keyed 构建脚本） |
 
 ---
 

@@ -70,7 +70,14 @@ GITHUB_REPO="${GITHUB_REPO:-tearizz/sbenv}"
 GITHUB_RELEASE_TAG="${GITHUB_RELEASE_TAG:-v1.0.0}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 OFFLINE=false
-[ "${1:-}" = "--docker" ] && OFFLINE=false && shift
+KEYLESS=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --docker)  OFFLINE=false; shift ;;
+        --keyless) KEYLESS=true;  shift ;;
+        *) break ;;
+    esac
+done
 
 # 优先级1: 本地已有离线备份文件
 if [ -f "$ROOTFS_BK" ]; then
@@ -346,7 +353,7 @@ _info "grub.cfg 已生成 (内核: ${KVER})"
 #  阶段 6: 签名 GRUB + 内核
 # =============================================================================
 _step "签名 GRUB EFI"
-# 顺序: fix_reloc → sbsign → sbverify (fix_reloc 会破坏已有签名)
+# 签名顺序: fix_reloc → sign (fix_reloc 会破坏已有签名)
 command -v sbsign >/dev/null 2>&1 || {
     sudo apt-get update && sudo apt-get install -y sbsigntool
 }
@@ -358,18 +365,31 @@ if [ -f "$FIX_RELOC" ]; then
     python3 "$FIX_RELOC" "$GRUB_EFI"
     _info "GRUB fix_reloc 完成"
 fi
-sbsign --key "$DB_KEY" --cert "$DB_CRT" --output "$GRUB_EFI" "$GRUB_EFI"
-sbverify --cert "$DB_CRT" "$GRUB_EFI" | grep -q 'Signature verification OK' \
-    || _die "GRUB 签名验证失败"
+
+if [ "$KEYLESS" = true ]; then
+    # Keyless: OriginSign (Fulcio + Rekor) only. No DB.crt signature is left
+    # in the file, so the shim really takes the remote verification path.
+    _info "GRUB 使用 OriginSign 无密钥签名 (Fulcio + Rekor)"
+    "$SELF_DIR/../sign-keyless.sh" "$GRUB_EFI"
+else
+    sbsign --key "$DB_KEY" --cert "$DB_CRT" --output "$GRUB_EFI" "$GRUB_EFI"
+    sbverify --cert "$DB_CRT" "$GRUB_EFI" | grep -q 'Signature verification OK' \
+        || _die "GRUB 签名验证失败"
+fi
 sudo cp "$GRUB_EFI" "$ESP_MP/EFI/BOOT/grubriscv64.efi"
 _info "GRUB 签名完成"
 
 _step "签名 Linux 内核"
 # 发行版内核无预签名, Secure Boot 下 GRUB shim_verify() 会拒绝未签名内核
 KERNEL="$ROOT_MP/boot/vmlinuz-${KVER}"
-sudo sbsign --key "$DB_KEY" --cert "$DB_CRT" --output "$KERNEL" "$KERNEL"
-sbverify --cert "$DB_CRT" "$KERNEL" \
-    | grep -q 'Signature verification OK' || _die "内核签名失败"
+if [ "$KEYLESS" = true ]; then
+    _info "内核使用 OriginSign 无密钥签名 (Fulcio + Rekor)"
+    "$SELF_DIR/../sign-keyless.sh" "$KERNEL"
+else
+    sudo sbsign --key "$DB_KEY" --cert "$DB_CRT" --output "$KERNEL" "$KERNEL"
+    sbverify --cert "$DB_CRT" "$KERNEL" \
+        | grep -q 'Signature verification OK' || _die "内核签名失败"
+fi
 _info "内核签名完成: vmlinuz-${KVER}"
 
 # =============================================================================
